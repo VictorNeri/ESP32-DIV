@@ -17,6 +17,7 @@
 #include "espnow_test.h"
 #include "wifi_assessment.h"
 #include "ble_assessment.h"
+#include "menu_navigation_ui.h"
 #include "touch_calibration.h"
 #include "subconfig.h"
 #include "utils.h"
@@ -34,6 +35,12 @@ ButtonExpander pcf;
 #define BTN_SELECT BOARD_BUTTON_SELECT
 
 bool feature_exit_requested = false;
+int injectedButton = -1;
+size_t mainMenuPage = 0;
+size_t submenuPage = 0;
+bool unifiedTouchDown = false;
+MenuNavigation::ReleaseTracker unifiedMenuTouchTracker;
+MenuNavigation::MenuEvent lastUnifiedTouchEvent;
 
 const int NUM_MENU_ITEMS = 8;
 const char *menu_items[NUM_MENU_ITEMS] = {
@@ -303,6 +310,10 @@ void updateActiveSubmenu() {
 }
 
 bool isButtonPressed(int buttonPin) {
+  if (injectedButton == buttonPin) {
+    injectedButton = -1;
+    return true;
+  }
   // On the C5 `pcf` is the touch-backed ButtonExpander, so this works there too.
   return !pcf.digitalRead(buttonPin);
 }
@@ -344,149 +355,35 @@ void displaySubmenu() {
     menu_initialized = false;
     last_menu_index = -1;
 
-    tft.setTextFont(2);
-    tft.setTextSize(1);
-
-    if (!submenu_initialized) {
-        tft.fillScreen(TFT_BLACK);
-
-        for (int i = 0; i < active_submenu_size; i++) {
-            int yPos = 30 + i * 30;
-            if (i == active_submenu_size - 1) yPos += 10;
-
-            uint16_t itemColor = submenuItemHwAvailable(i) ? UI_CYAN : GRAY;
-            tft.setTextColor(itemColor, TFT_BLACK);
-            tft.drawBitmap(10, yPos, active_submenu_icons[i], 16, 16, itemColor);
-            tft.setCursor(30, yPos);
-            if (i < active_submenu_size - 1) {
-                tft.print("| ");
-            }
-            tft.print(active_submenu_items[i]);
-        }
-
-        submenu_initialized = true;
-        last_submenu_index = -1;
+    const size_t unifiedItemCount = active_submenu_size > 0
+        ? static_cast<size_t>(active_submenu_size - 1) : 0;
+    UnifiedMenu::Item unifiedItems[NUM_SUBMENU_ITEMS];
+    for (size_t i = 0; i < unifiedItemCount; ++i) {
+        unifiedItems[i] = {active_submenu_items[i], active_submenu_icons[i],
+                           submenuItemHwAvailable(static_cast<int>(i))};
     }
-
-    if (last_submenu_index != current_submenu_index) {
-        if (last_submenu_index >= 0) {
-            int prev_yPos = 30 + last_submenu_index * 30;
-            if (last_submenu_index == active_submenu_size - 1) prev_yPos += 10;
-
-            uint16_t prevColor = submenuItemHwAvailable(last_submenu_index) ? UI_CYAN : GRAY;
-            tft.setTextColor(prevColor, TFT_BLACK);
-            tft.drawBitmap(10, prev_yPos, active_submenu_icons[last_submenu_index], 16, 16, prevColor);
-            tft.setCursor(30, prev_yPos);
-            if (last_submenu_index < active_submenu_size - 1) {
-                tft.print("| ");
-            }
-            tft.print(active_submenu_items[last_submenu_index]);
-        }
-
-        int new_yPos = 30 + current_submenu_index * 30;
-        if (current_submenu_index == active_submenu_size - 1) new_yPos += 10;
-
-        uint16_t curColor = submenuItemHwAvailable(current_submenu_index) ? UI_AMBER : GRAY;
-        tft.setTextColor(curColor, TFT_BLACK);
-        tft.drawBitmap(10, new_yPos, active_submenu_icons[current_submenu_index], 16, 16, curColor);
-        tft.setCursor(30, new_yPos);
-        if (current_submenu_index < active_submenu_size - 1) {
-            tft.print("| ");
-        }
-        tft.print(active_submenu_items[current_submenu_index]);
-
-        last_submenu_index = current_submenu_index;
-    }
-
-    drawStatusBar(currentBatteryVoltage, true);
+    submenuPage = MenuNavigation::clampPage(submenuPage, unifiedItemCount);
+    const size_t selected = current_submenu_index >= 0 &&
+                            static_cast<size_t>(current_submenu_index) < unifiedItemCount
+        ? static_cast<size_t>(current_submenu_index) : SIZE_MAX;
+    UnifiedMenu::drawMenu(menu_items[current_menu_index], unifiedItems,
+                          unifiedItemCount, submenuPage, true, selected);
+    submenu_initialized = true;
+    last_submenu_index = current_submenu_index;
 }
 
-const int COLUMN_WIDTH = 120;
-const int X_OFFSET_LEFT = 10;
-const int X_OFFSET_RIGHT = X_OFFSET_LEFT + COLUMN_WIDTH;
-const int Y_START = 30;
-const int Y_SPACING = 75;
-
 void displayMenu() {
-
-const uint16_t icon_colors[NUM_MENU_ITEMS] = {
-  0xFFFF, // WiFi
-  0xFFFF, // Bluetooth
-  0xFFFF, // 2.4GHz
-  0xFFFF, // SubGHz
-  0xFFFF, // ESP-NOW
-  0xFFFF, // Tools
-  0x8410, // Setting
-  0xFFFF  // About
-};
-
+    UnifiedMenu::Item unifiedItems[NUM_MENU_ITEMS];
+    for (size_t i = 0; i < NUM_MENU_ITEMS; ++i) {
+        unifiedItems[i] = {menu_items[i], bitmap_icons[i], true};
+    }
+    mainMenuPage = MenuNavigation::clampPage(mainMenuPage, NUM_MENU_ITEMS);
+    UnifiedMenu::drawMenu("Quetzal", unifiedItems, NUM_MENU_ITEMS, mainMenuPage,
+                          false, current_menu_index);
     submenu_initialized = false;
     last_submenu_index = -1;
-    tft.setTextFont(2);
-
-    if (!menu_initialized) {
-        // Plain black background; a proper themed background is still TBD.
-        tft.fillScreen(TFT_BLACK);
-
-        for (int i = 0; i < NUM_MENU_ITEMS; i++) {
-            int column = i / 4;
-            int row = i % 4;
-            int x_position = (column == 0) ? X_OFFSET_LEFT : X_OFFSET_RIGHT;
-            int y_position = Y_START + row * Y_SPACING;
-
-            // Clear/transparent button - just border, no fill
-            tft.drawRoundRect(x_position, y_position, 100, 60, 5, UI_CYAN);
-            tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[i], 16, 16, UI_CYAN);
-
-            tft.setTextColor(UI_CYAN);  // Transparent background
-            int textWidth = 6 * strlen(menu_items[i]);
-            int textX = x_position + (100 - textWidth) / 2;
-            int textY = y_position + 30;
-            tft.setCursor(textX, textY);
-            tft.print(menu_items[i]);
-        }
-        menu_initialized = true;
-        last_menu_index = -1;
-    }
-
-    if (last_menu_index != current_menu_index) {
-        for (int i = 0; i < NUM_MENU_ITEMS; i++) {
-            int column = i / 4;
-            int row = i % 4;
-            int x_position = (column == 0) ? X_OFFSET_LEFT : X_OFFSET_RIGHT;
-            int y_position = Y_START + row * Y_SPACING;
-
-            if (i == last_menu_index) {
-                // Deselected - redraw border in cyan (erase magenta border)
-                tft.drawRoundRect(x_position, y_position, 100, 60, 5, UI_CYAN);
-                tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[last_menu_index], 16, 16, UI_CYAN);
-                tft.setTextColor(UI_CYAN);
-                int textWidth = 6 * strlen(menu_items[last_menu_index]);
-                int textX = x_position + (100 - textWidth) / 2;
-                int textY = y_position + 30;
-                tft.setCursor(textX, textY);
-                tft.print(menu_items[last_menu_index]);
-            }
-        }
-
-        int column = current_menu_index / 4;
-        int row = current_menu_index % 4;
-        int x_position = (column == 0) ? X_OFFSET_LEFT : X_OFFSET_RIGHT;
-        int y_position = Y_START + row * Y_SPACING;
-
-        // Selected button - amber border and text
-        tft.drawRoundRect(x_position, y_position, 100, 60, 5, UI_AMBER);
-        tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[current_menu_index], 16, 16, UI_AMBER);
-        tft.setTextColor(UI_AMBER);
-        int textWidth = 6 * strlen(menu_items[current_menu_index]);
-        int textX = x_position + (100 - textWidth) / 2;
-        int textY = y_position + 30;
-        tft.setCursor(textX, textY);
-        tft.print(menu_items[current_menu_index]);
-
-        last_menu_index = current_menu_index;
-    }
-    drawStatusBar(currentBatteryVoltage, true);
+    menu_initialized = true;
+    last_menu_index = current_menu_index;
 }
 
 
@@ -3338,7 +3235,81 @@ void handleAboutPage() {
 }
 
 
+bool handleUnifiedMenuTouch() {
+    if (feature_active) {
+        unifiedTouchDown = false;
+        unifiedMenuTouchTracker.cancel();
+        lastUnifiedTouchEvent = {};
+        return false;
+    }
+
+    const size_t itemCount = in_sub_menu && active_submenu_size > 0
+        ? static_cast<size_t>(active_submenu_size - 1)
+        : static_cast<size_t>(NUM_MENU_ITEMS);
+    const size_t page = in_sub_menu ? submenuPage : mainMenuPage;
+    const bool down = ts.touched();
+    if (down) {
+        TS_Point point = ts.getPoint();
+        const int x = ::map(point.x, TS_MINX, TS_MAXX, 0, 239);
+        const int y = ::map(point.y, TS_MAXY, TS_MINY, 0, 319);
+        lastUnifiedTouchEvent = MenuNavigation::hitTestMenu(x, y, itemCount, page);
+        if (!unifiedTouchDown) unifiedMenuTouchTracker.press(lastUnifiedTouchEvent);
+        else unifiedMenuTouchTracker.update(lastUnifiedTouchEvent);
+        unifiedTouchDown = true;
+        return true;
+    }
+    if (!unifiedTouchDown) return false;
+
+    unifiedTouchDown = false;
+    const MenuNavigation::MenuEvent event =
+        unifiedMenuTouchTracker.release(lastUnifiedTouchEvent);
+    lastUnifiedTouchEvent = {};
+    using MenuNavigation::MenuAction;
+    if (event.action == MenuAction::None) return true;
+    if (event.action == MenuAction::Back) {
+        if (in_sub_menu) {
+            in_sub_menu = false;
+            feature_active = false;
+            feature_exit_requested = false;
+            current_submenu_index = 0;
+            submenuPage = 0;
+            is_main_menu = false;
+            displayMenu();
+        }
+        return true;
+    }
+    if (event.action == MenuAction::PreviousPage || event.action == MenuAction::NextPage) {
+        if (in_sub_menu) {
+            submenuPage = event.index;
+            current_submenu_index = static_cast<int>(submenuPage * MenuNavigation::ROWS_PER_PAGE);
+            displaySubmenu();
+        } else {
+            mainMenuPage = event.index;
+            current_menu_index = static_cast<int>(mainMenuPage * MenuNavigation::ROWS_PER_PAGE);
+            displayMenu();
+        }
+        return true;
+    }
+    if (event.action != MenuAction::Item) return true;
+    if (in_sub_menu) {
+        if (event.index >= itemCount || !submenuItemHwAvailable(static_cast<int>(event.index))) {
+            return true;
+        }
+        current_submenu_index = static_cast<int>(event.index);
+        displaySubmenu();
+    } else {
+        if (event.index >= NUM_MENU_ITEMS) return true;
+        current_menu_index = static_cast<int>(event.index);
+        submenuPage = 0;
+        displayMenu();
+    }
+    last_interaction_time = millis();
+    injectedButton = BTN_SELECT;
+    return false;
+}
+
 void handleButtons() {
+    if (handleUnifiedMenuTouch()) return;
     if (in_sub_menu) {
         switch (current_menu_index) {
             case 0: handleWiFiSubmenuButtons(); break;
@@ -3421,61 +3392,6 @@ void handleButtons() {
             }
         }
 
-        static unsigned long lastTouchTime = 0;
-        const unsigned long touchFeedbackDelay = 100;
-
-        if (ts.touched() && !feature_active && (millis() - lastTouchTime >= touchFeedbackDelay)) {
-            TS_Point p = ts.getPoint();
-            delay(10);
-
-            int x, y;
-            x = ::map(p.x, TS_MINX, TS_MAXX, 0, 239);
-            y = ::map(p.y, TS_MAXY, TS_MINY, 0, 319);
-
-            for (int i = 0; i < NUM_MENU_ITEMS; i++) {
-                int column = i / 4;
-                int row = i % 4;
-                int x_position = (column == 0) ? X_OFFSET_LEFT : X_OFFSET_RIGHT;
-                int y_position = Y_START + row * Y_SPACING;
-
-                int button_x1 = x_position;
-                int button_y1 = y_position;
-                int button_x2 = x_position + 100;
-                int button_y2 = y_position + 60;
-
-                if (x >= button_x1 && x <= button_x2 && y >= button_y1 && y <= button_y2) {
-                    current_menu_index = i;
-                    last_interaction_time = millis();
-                    displayMenu();
-
-                    unsigned long startTime = millis();
-                    while (ts.touched() && (millis() - startTime < touchFeedbackDelay)) {
-                        delay(10);
-                    }
-
-                    if (ts.touched()) {
-                        updateActiveSubmenu();
-
-                        if (active_submenu_items && active_submenu_size > 0) {
-                            current_submenu_index = 0;
-                            in_sub_menu = true;
-                            submenu_initialized = false;
-                            displaySubmenu();
-                        } else {
-
-                            if (is_main_menu) {
-                                is_main_menu = false;
-                                displayMenu();
-                            } else {
-                                is_main_menu = true;
-                            }
-                        }
-                    }
-                    delay(200);
-                    break;
-                }
-            }
-        }
     }
 }
 

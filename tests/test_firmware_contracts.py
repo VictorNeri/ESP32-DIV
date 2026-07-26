@@ -5,6 +5,29 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class FirmwareContractTests(unittest.TestCase):
+    def test_unified_resistive_menu_contract(self):
+        logic = (ROOT / "menu_navigation_logic.h").read_text(encoding="utf-8")
+        ui_path = ROOT / "menu_navigation_ui.cpp"
+        self.assertTrue(ui_path.is_file())
+        self.assertTrue((ROOT / "menu_navigation_ui.h").is_file())
+        ui = ui_path.read_text(encoding="utf-8")
+        self.assertIn("ROWS_PER_PAGE = 5", logic)
+        self.assertIn("ROW_HEIGHT = 44", logic)
+        self.assertIn("ReleaseTracker", logic)
+        self.assertIn("drawMenu", ui)
+        self.assertIn('"< BACK"', ui)
+        self.assertIn('"PREV"', ui)
+        self.assertIn('"NEXT"', ui)
+
+    def test_main_and_legacy_submenus_use_unified_navigation(self):
+        sketch = (ROOT / "quetzal.ino").read_text(encoding="utf-8")
+        self.assertIn('#include "menu_navigation_ui.h"', sketch)
+        self.assertIn("handleUnifiedMenuTouch", sketch)
+        self.assertIn("MenuNavigation::ReleaseTracker", sketch)
+        self.assertGreaterEqual(sketch.count("UnifiedMenu::drawMenu"), 2)
+        self.assertIn("injectedButton", sketch)
+        self.assertNotIn("while (ts.touched() && (millis() - startTime < touchFeedbackDelay))", sketch)
+
     def test_espnow_replaces_ir_remote_menu(self):
         sketch = (ROOT / "quetzal.ino").read_text(encoding="utf-8")
         self.assertNotIn('"IR Remote"', sketch)
@@ -59,6 +82,19 @@ class FirmwareContractTests(unittest.TestCase):
         self.assertIn("MAX_DEAUTH_FRAMES", suite)
         self.assertIn("AUTHORIZATION_REQUIRED", suite)
 
+    def test_wifi_assessment_uses_unified_menu_navigation(self):
+        suite = (ROOT / "wifi_assessment.cpp").read_text(encoding="utf-8")
+        self.assertIn('#include "menu_navigation_ui.h"', suite)
+        self.assertIn("MenuNavigation::ReleaseTracker", suite)
+        self.assertIn("MenuNavigation::hitTestMenu", suite)
+        self.assertIn("UnifiedMenu::drawMenu", suite)
+        self.assertNotIn("i * 27", suite)
+        self.assertIn("resilienceStopped", suite)
+        self.assertIn("EMERGENCY STOP", suite)
+        self.assertIn("fillRect(0, RESILIENCE_ACTION_TOP, SCREEN_W", suite)
+        self.assertNotIn("view == View::Resilience && y >= 225", suite)
+        self.assertIn("view == View::Resilience && y >= RESILIENCE_ACTION_TOP", suite)
+
     def test_wifi_assessment_safety_regressions(self):
         suite = (ROOT / "wifi_assessment.cpp").read_text(encoding="utf-8")
         capture = (ROOT / "wifi_capture.cpp").read_text(encoding="utf-8")
@@ -97,6 +133,26 @@ class FirmwareContractTests(unittest.TestCase):
         self.assertIn("BleAssessment::setup", sketch)
         self.assertIn("BleAssessment::cleanup", sketch)
 
+    def test_ble_assessment_uses_unified_menu_navigation(self):
+        suite = (ROOT / "ble_assessment.cpp").read_text(encoding="utf-8")
+        self.assertIn('#include "menu_navigation_ui.h"', suite)
+        self.assertIn("MenuNavigation::ReleaseTracker", suite)
+        self.assertIn("MenuNavigation::hitTestMenu", suite)
+        self.assertIn("UnifiedMenu::drawMenu", suite)
+        self.assertIn("Select target:", suite)
+        self.assertNotIn('"tap bottom to page"', suite)
+        self.assertNotIn('"bottom=rescan/page"', suite)
+        self.assertNotIn("toolPage * TOOLS_PER_PAGE", suite)
+        self.assertNotIn("devicePage * 10", suite)
+        self.assertIn("fillRect(0, 270, 240, 50", suite)
+        self.assertIn("if (y < 270) return false;", suite)
+        self.assertIn("updateStatusBar();", suite)
+        self.assertIn("activeStage == ActiveStage::Running && emergencyStop()", suite)
+
+    def test_status_popup_consumes_close_touch_release(self):
+        utils = (ROOT / "utils.cpp").read_text(encoding="utf-8")
+        self.assertIn("while (ts.touched()) delay(10);", utils)
+
     def test_ble_assessment_active_safety_contract(self):
         suite = (ROOT / "ble_assessment.cpp").read_text(encoding="utf-8")
         for token in (
@@ -134,6 +190,14 @@ class FirmwareContractTests(unittest.TestCase):
         self.assertIn("processPairingTest", suite)
         self.assertIn("subscriptionSecurityTransitions", suite)
         self.assertIn("unencryptedNotificationCount", suite)
+        notification_start = suite.index("for (size_t i = 0; i < characteristicCount && subscriptionCount")
+        notification_end = suite.index("if (subscriptionCount == 0)", notification_start)
+        self.assertGreaterEqual(suite[notification_start:notification_end].count("emergencyStop()"), 2)
+        replay_start = suite.index("void sendReplayOnce()")
+        replay_end = suite.index("void drawHeader", replay_start)
+        replay = suite[replay_start:replay_end]
+        self.assertIn("drawTool();\n  waitForTouchRelease();", replay)
+        self.assertGreaterEqual(replay.count("emergencyStop()"), 2)
         self.assertIn("subscriptionUnencryptedEvents", suite)
         self.assertIn("lastNotificationUuid", suite)
         self.assertIn("notificationCallback(generation, source", suite)

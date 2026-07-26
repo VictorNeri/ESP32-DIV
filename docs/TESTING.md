@@ -25,8 +25,17 @@ Record the generated firmware size and SHA-256 checksum for a release artifact.
 1. Run Settings > Touch Calibration and reboot.
 2. Verify calibration persists.
 3. Test every menu edge and status-bar popup.
-4. Exercise brightness and screen timeout.
-5. Confirm touch remains active after every storage and radio operation.
+4. On every main, submenu, Wi-Fi Assessment, and BLE Assessment page, verify a
+   quick tap activates once on release and a held touch never repeats.
+5. Verify each page shows at most five full-width rows and that Previous/Next
+   disable at the first/last page without wrapping or selecting an off-page row.
+6. Press on one row, drag to another, and release; verify neither row activates.
+7. Verify the top-right Back target always returns one level and never starts a
+   feature. Confirm unavailable RF-HAT entries remain disabled.
+8. During Wi-Fi Deauth Resilience and each running BLE active assessment, verify
+   the complete red bottom STOP bar aborts from its left, center, and right edge.
+9. Exercise brightness and screen timeout.
+10. Confirm touch remains active after every storage and radio operation.
 
 ## Storage and update
 

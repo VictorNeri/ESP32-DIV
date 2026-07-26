@@ -2,6 +2,7 @@
 
 #include "Touchscreen.h"
 #include "icon.h"
+#include "menu_navigation_ui.h"
 #include "shared.h"
 #include "utils.h"
 #include "wifi_80211.h"
@@ -24,6 +25,7 @@ constexpr int SCREEN_W = 240;
 constexpr int SCREEN_H = 320;
 constexpr int TOP_Y = 20;
 constexpr int BACK_X = 210;
+constexpr int RESILIENCE_ACTION_TOP = 270;
 constexpr size_t MAX_APS = 32;
 constexpr size_t MAX_CLIENTS = 32;
 constexpr uint32_t SURVEY_DWELL_MS = 600;
@@ -92,6 +94,9 @@ size_t clientCount = 0;
 View view = View::Menu;
 bool uiDrawn = false;
 bool touchWasDown = false;
+size_t menuPage = 0;
+MenuNavigation::ReleaseTracker menuTouchTracker;
+MenuNavigation::MenuEvent lastMenuTouchEvent;
 size_t selectedAp = 0;
 size_t auditOffset = 0;
 uint32_t lastUiUpdate = 0;
@@ -123,6 +128,7 @@ bool surveyError = false;
 bool authorized = false;
 bool deauthConfirmed = false;
 bool deauthRunning = false;
+bool resilienceStopped = false;
 bool deauthChannelError = false;
 bool observationCaptureError = false;
 uint8_t deauthSent = 0;
@@ -328,17 +334,12 @@ void ensureInventory(bool enrich) {
 }
 
 void drawMenu() {
-  drawChrome("Wi-Fi Assessment Suite");
+  UnifiedMenu::Item items[TOOL_COUNT];
   for (size_t i = 0; i < TOOL_COUNT; ++i) {
-    int y = 67 + static_cast<int>(i) * 27;
-    tft.drawRoundRect(6, y - 4, 228, 24, 3, UI_GUNMETAL);
-    tft.setTextColor(UI_CYAN, TFT_BLACK);
-    tft.setCursor(12, y + 3);
-    tft.printf("%u. %s", static_cast<unsigned>(i + 1), TOOL_NAMES[i]);
+    items[i] = {TOOL_NAMES[i], nullptr, true};
   }
-  tft.setTextColor(UI_GUNMETAL, TFT_BLACK);
-  tft.setCursor(8, 292);
-  tft.print("Authorized networks only");
+  menuPage = MenuNavigation::clampPage(menuPage, TOOL_COUNT);
+  UnifiedMenu::drawMenu("WiFi Assessment", items, TOOL_COUNT, menuPage, true);
   uiDrawn = true;
 }
 
@@ -719,6 +720,7 @@ void drawSurvey() {
 
 void resetResilience() {
   authorized = deauthConfirmed = deauthRunning = false;
+  resilienceStopped = false;
   deauthChannelError = false;
   observationCaptureError = false;
   deauthSent = deauthAccepted = 0;
@@ -729,6 +731,7 @@ void resetResilience() {
 void startDeauthTest() {
   if (clientCount == 0) return;
   deauthRunning = false;
+  resilienceStopped = false;
   deauthChannelError = false;
   observationCaptureError = false;
   deauthSent = deauthAccepted = 0;
@@ -797,17 +800,25 @@ void drawResilience() {
   else if (!deauthConfirmed) tft.print("Step 2: confirm bounded test");
   else if (deauthChannelError) tft.print("ABORTED: target channel unavailable");
   else if (observationCaptureError) tft.print("Observation unavailable: inconclusive");
+  else if (resilienceStopped) tft.print("STOPPED by operator");
   else if (deauthRunning) tft.printf("Sending: %u/%u accepted %u", deauthSent, MAX_DEAUTH_FRAMES, deauthAccepted);
   else if (observeUntil) tft.print("Observing client activity...");
   else if (deauthSent) tft.printf("Post-test client frames: %lu", static_cast<unsigned long>(clientActivityAfterTest));
-  tft.drawRoundRect(15, 235, 210, 46, 4, authorized ? UI_AMBER : UI_CYAN);
+  const bool running = deauthRunning || observeUntil;
+  tft.fillRect(0, RESILIENCE_ACTION_TOP, SCREEN_W,
+               SCREEN_H - RESILIENCE_ACTION_TOP, running ? TFT_RED : TFT_BLACK);
+  tft.drawRect(0, RESILIENCE_ACTION_TOP, SCREEN_W,
+               SCREEN_H - RESILIENCE_ACTION_TOP,
+               running ? TFT_RED : (authorized ? UI_AMBER : UI_CYAN));
   const char* actionLabel = AUTHORIZATION_REQUIRED;
   if (authorized && !deauthConfirmed) actionLabel = "SEND BOUNDED TEST";
   else if (deauthChannelError) actionLabel = "ABORTED";
   else if (observationCaptureError) actionLabel = "INCONCLUSIVE";
-  else if (deauthRunning || observeUntil) actionLabel = "TEST IN PROGRESS";
+  else if (running) actionLabel = "EMERGENCY STOP";
+  else if (resilienceStopped) actionLabel = "STOPPED";
   else if (deauthSent) actionLabel = "TEST COMPLETE";
-  tft.setCursor(authorized ? 63 : 62, 253);
+  tft.setTextColor(running ? TFT_WHITE : UI_CYAN, running ? TFT_RED : TFT_BLACK);
+  tft.setCursor(running ? 61 : (authorized ? 63 : 62), 287);
   tft.print(actionLabel);
 }
 
@@ -850,10 +861,15 @@ void enterTool(size_t index) {
   uiDrawn = true;
 }
 
-void handleMenuTouch(int, int y) {
-  for (size_t i = 0; i < TOOL_COUNT; ++i) {
-    int rowY = 63 + static_cast<int>(i) * 27;
-    if (y >= rowY && y <= rowY + 26) { enterTool(i); return; }
+void handleMenuEvent(const MenuNavigation::MenuEvent& event) {
+  using MenuNavigation::MenuAction;
+  if (event.action == MenuAction::Back) {
+    feature_exit_requested = true;
+  } else if (event.action == MenuAction::PreviousPage || event.action == MenuAction::NextPage) {
+    menuPage = event.index;
+    drawMenu();
+  } else if (event.action == MenuAction::Item && event.index < TOOL_COUNT) {
+    enterTool(event.index);
   }
 }
 
@@ -864,7 +880,10 @@ void setup() {
   std::memset(clients, 0, sizeof(clients));
   view = View::Menu;
   uiDrawn = false;
-  touchWasDown = ts.touched();
+  menuPage = 0;
+  touchWasDown = false;
+  menuTouchTracker.cancel();
+  lastMenuTouchEvent = {};
   drawMenu();
 }
 
@@ -893,16 +912,32 @@ void loop() {
     }
   }
 
+  if (view == View::Menu) {
+    const bool down = ts.touched();
+    if (down) {
+      TS_Point point = ts.getPoint();
+      const int x = ::map(point.x, TS_MINX, TS_MAXX, 0, SCREEN_W - 1);
+      const int y = ::map(point.y, TS_MAXY, TS_MINY, 0, SCREEN_H - 1);
+      lastMenuTouchEvent = MenuNavigation::hitTestMenu(x, y, TOOL_COUNT, menuPage);
+      if (!touchWasDown) menuTouchTracker.press(lastMenuTouchEvent);
+      else menuTouchTracker.update(lastMenuTouchEvent);
+      touchWasDown = true;
+    } else if (touchWasDown) {
+      touchWasDown = false;
+      handleMenuEvent(menuTouchTracker.release(lastMenuTouchEvent));
+      lastMenuTouchEvent = {};
+    }
+    return;
+  }
+
+  menuTouchTracker.cancel();
   int x, y;
   if (!getTouch(x, y)) return;
   if (backTouched(x, y)) {
-    if (view == View::Menu) feature_exit_requested = true;
-    else stopTool();
+    stopTool();
     return;
   }
-  if (view == View::Menu) {
-    handleMenuTouch(x, y);
-  } else if (view == View::Audit && y >= 78 && y < 257) {
+  if (view == View::Audit && y >= 78 && y < 257) {
     size_t index = auditOffset + static_cast<size_t>((y - 78) / 25);
     if (index < std::min<size_t>(apCount, auditOffset + 7)) { selectedAp = index; drawAudit(); }
   } else if (view == View::Audit && y >= 257) {
@@ -915,7 +950,14 @@ void loop() {
     if (x < 120 && apCount) saveBaseline(aps[selectedAp]);
     else compareBaseline();
     drawRogue();
-  } else if (view == View::Resilience && y >= 225 && clientCount > 0) {
+  } else if (view == View::Resilience && y >= RESILIENCE_ACTION_TOP &&
+             (deauthRunning || observeUntil)) {
+    deauthRunning = false;
+    observeUntil = 0;
+    resilienceStopped = true;
+    WifiCapture::end();
+    drawResilience();
+  } else if (view == View::Resilience && y >= RESILIENCE_ACTION_TOP && clientCount > 0) {
     if (!authorized) authorized = true;
     else if (!deauthConfirmed) { deauthConfirmed = true; startDeauthTest(); }
     drawResilience();

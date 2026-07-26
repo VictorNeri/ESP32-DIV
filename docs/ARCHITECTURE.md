@@ -51,6 +51,17 @@ backing it with touchscreen hit regions. This keeps inherited feature loops
 usable without a physical button expander. Calibration values are mutable and
 loaded from NVS by `touch_calibration.cpp`.
 
+Primary navigation does not depend on that compatibility layer.
+`menu_navigation_logic.*` owns the 240x320 layout, five-row pagination,
+rectangle hit testing, and press/release matching without Arduino dependencies.
+`menu_navigation_ui.*` renders a 20-pixel status region, 40-pixel title/Back
+header, five 44-pixel full-width rows, and a 40-pixel Previous/page/Next footer.
+The main menu, inherited submenus, and both assessment-suite menus use this same
+geometry. A row activates only when the touch starts and ends on the same target;
+holding a touch cannot repeat activation. Active assessment operations reserve
+the full bottom 50 pixels for a red emergency STOP control instead of paging or
+action controls.
+
 ## External RF detection
 
 `hw_detect.cpp` probes both supported RF chips at boot and records availability.

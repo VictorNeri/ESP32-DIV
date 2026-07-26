@@ -27,6 +27,8 @@ All notable changes to Quetzal are documented here.
 - Status-bar connectivity popup
 - Reproducible PlatformIO build and ESP32-C5 Linux flash helper
 - Architecture, hardware, and physical-test documentation
+- Shared resistive-touch navigation with five full-width rows, deterministic
+  pagination, release-edge activation, and fixed labeled controls
 
 ### Changed
 
@@ -43,6 +45,9 @@ All notable changes to Quetzal are documented here.
 - Expanded BLE assessment documentation with the final target-binding,
   asynchronous pairing, disconnect-state, source-aware notification, CCCD-write,
   long-read replay, STOP, and fixed resource-limit behavior
+- Unified the main menu, inherited submenus, Wi-Fi Assessment, BLE Assessment,
+  and BLE target selection on one paginated layout; active Wi-Fi/BLE assessments
+  now expose a full-width red emergency STOP footer
 
 ### Fixed
 

@@ -27,6 +27,12 @@ Quetzal explicitly releases and restores that bus when switching devices.
 Only one external RF module may be fitted and active at a time because CC1101
 and NRF24L01+ share the RF-HAT chip-select and control pins.
 
+All primary menus use the same resistive-touch navigation model: a fixed header,
+five full-width 44-pixel rows, explicit Back/Previous/Next controls, and one
+activation on touch release. Long presses, swipes, and hidden menu gesture zones
+are not required. Active Wi-Fi and BLE assessment operations replace the footer
+with a full-width red emergency STOP control.
+
 See [docs/HARDWARE.md](docs/HARDWARE.md) for the complete pin map and hardware
 constraints.
 

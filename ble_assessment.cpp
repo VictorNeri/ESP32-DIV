@@ -3,6 +3,7 @@
 #include "ble_assessment_logic.h"
 #include "ble_compat.h"
 #include "ble_hid_inject.h"
+#include "menu_navigation_ui.h"
 #include "shared.h"
 #include "Touchscreen.h"
 #include "utils.h"
@@ -41,7 +42,7 @@ const char* const TOOL_NAMES[] = {
     "ATT Robustness", "Connection Resilience", "Mesh Auditor",
     "Replay Tester"};
 constexpr size_t TOOL_COUNT = sizeof(TOOL_NAMES) / sizeof(TOOL_NAMES[0]);
-constexpr size_t TOOLS_PER_PAGE = 7;
+constexpr size_t SUITE_ITEM_COUNT = TOOL_COUNT + 1;  // target selector + tools
 
 struct DeviceRecord {
   BLEAddress address;
@@ -102,9 +103,13 @@ bool confirmed = false;
 BLEAddress authorizedTarget;
 bool authorizedTargetValid = false;
 bool touchWasDown = false;
+MenuNavigation::ReleaseTracker menuTouchTracker;
+MenuNavigation::MenuEvent lastMenuTouchEvent;
 bool suiteBlocked = false;
 volatile bool callbacksEnabled = false;
 uint32_t notificationGeneration = 0;
+
+void drawTool();
 
 
 BLEScan* scan = nullptr;
@@ -286,7 +291,7 @@ bool emergencyStop() {
   if (ts.touched()) {
     TS_Point p = ts.getPoint();
     const int y = ::map(p.y, TS_MAXY, TS_MINY, 0, 319);
-    if (y < 250) return false;
+    if (y < 270) return false;
     activeStage = ActiveStage::Aborted;
     setMessage("STOP requested; operation aborted");
     disconnectClient();
@@ -405,10 +410,13 @@ bool connectSelected(bool discover = true) {
   }
   client->setConnectTimeout(5000);
   client->setConnectRetries(0);
+  if (activeStage == ActiveStage::Running && emergencyStop()) return false;
   portENTER_CRITICAL(&clientStateMux);
   clientDisconnected = false;
   portEXIT_CRITICAL(&clientStateMux);
-  if (!client->connect(devices[selectedDevice].address, true, false, true)) {
+  const bool connected = client->connect(devices[selectedDevice].address, true, false, true);
+  if (activeStage == ActiveStage::Running && emergencyStop()) return false;
+  if (!connected) {
     portENTER_CRITICAL(&clientStateMux);
     clientDisconnected = true;
     portEXIT_CRITICAL(&clientStateMux);
@@ -416,7 +424,9 @@ bool connectSelected(bool discover = true) {
     setMessage("Connection failed");
     return false;
   }
-  if (discover && !client->discoverAttributes()) {
+  const bool discovered = !discover || client->discoverAttributes();
+  if (activeStage == ActiveStage::Running && emergencyStop()) return false;
+  if (!discovered) {
     setMessage("Connected; GATT discovery incomplete");
   } else {
     setMessage("Connected");
@@ -541,7 +551,8 @@ bool probeReadLong(uint16_t handle) {
     status = rawRead.status;
     portEXIT_CRITICAL(&rawReadMux);
     if (done) return status == 0;
-    if (static_cast<int32_t>(millis() - deadline) >= 0) {
+    if ((activeStage == ActiveStage::Running && emergencyStop()) ||
+        static_cast<int32_t>(millis() - deadline) >= 0) {
       disconnectClient();
       return false;
     }
@@ -556,10 +567,12 @@ void collectCharacteristics(bool attemptReads) {
   if (client == nullptr || !client->isConnected()) return;
   const std::vector<BLERemoteService*>& services = client->getServices(true);
   for (BLERemoteService* service : services) {
+    if (activeStage == ActiveStage::Running && emergencyStop()) return;
     if (service == nullptr) continue;
     ++serviceCount;
     const std::vector<BLERemoteCharacteristic*>& chars = service->getCharacteristics(true);
     for (BLERemoteCharacteristic* characteristic : chars) {
+      if (activeStage == ActiveStage::Running && emergencyStop()) return;
       if (characteristic == nullptr || characteristicCount >= MAX_CHARACTERISTICS) break;
       CharacteristicRecord& out = characteristics[characteristicCount++];
       out = CharacteristicRecord{};
@@ -670,6 +683,8 @@ void runPrivacyAnalyzer() {
 
 void runPairingTest() {
   activeStage = ActiveStage::Running;
+  setMessage("Pairing test starting; bottom=STOP");
+  drawTool();
   waitForTouchRelease();
   if (!connectSelected(true)) {
     activeStage = ActiveStage::Aborted;
@@ -769,6 +784,8 @@ void runNotificationMonitor() {
   disconnectClient();
   activeStage = ActiveStage::Running;
   operationFailed = false;
+  setMessage("Notification monitor starting; bottom=STOP");
+  drawTool();
   waitForTouchRelease();
   if (!connectSelected(true)) {
     activeStage = ActiveStage::Aborted;
@@ -792,6 +809,10 @@ void runNotificationMonitor() {
   for (size_t i = 0; i < characteristicCount && subscriptionCount < MAX_SUBSCRIPTIONS; ++i) {
     CharacteristicRecord& record = characteristics[i];
     if (!record.notifiable && !record.indicatable) continue;
+    if (emergencyStop()) {
+      notificationUntil = 0;
+      return;
+    }
     const bool notifications = record.notifiable;
     const bool encryptedBefore = client->isConnected() && client->getConnInfo().isEncrypted();
     const size_t slot = subscriptionCount;
@@ -808,6 +829,10 @@ void runNotificationMonitor() {
           notificationCallback(generation, source, data, length);
         },
         true);
+    if (emergencyStop()) {
+      notificationUntil = 0;
+      return;
+    }
     const bool encryptedAfter = client->isConnected() && client->getConnInfo().isEncrypted();
     if (!subscribed) {
       portENTER_CRITICAL(&notificationMux);
@@ -845,6 +870,8 @@ void startAttRobustness() {
   attRecoveryConnected = false;
   attIndex = 0;
   attDeadline = millis() + ACTIVE_TEST_LIMIT_MS;
+  setMessage("Bounded read probes starting; bottom=STOP");
+  drawTool();
   waitForTouchRelease();
   if (!connectSelected(true)) {
     activeStage = ActiveStage::Aborted;
@@ -887,6 +914,8 @@ void startConnectionTest() {
   attRecoveryConnected = false;
   connectionAttempts = connectionSuccesses = 0;
   activeStage = ActiveStage::Running;
+  setMessage("Connection test starting; bottom=STOP");
+  drawTool();
   waitForTouchRelease();
   nextConnectionAt = millis();
   setMessage("Bounded connect/disconnect test running");
@@ -966,7 +995,9 @@ void captureReplayValue(bool advance = false) {
 
 void sendReplayOnce() {
   activeStage = ActiveStage::Running;
+  drawTool();
   waitForTouchRelease();
+  if (emergencyStop()) return;
   if (!replayCaptured || !replayPeerValid || !targetSelected ||
       devices[selectedDevice].address != replayPeerAddress || replayCharacteristic == nullptr ||
       client == nullptr || !client->isConnected()) {
@@ -975,6 +1006,7 @@ void sendReplayOnce() {
     return;
   }
   replaySent = replayCharacteristic->writeValue(replayData, replayLength, true);
+  if (emergencyStop()) return;
   setMessage(replaySent ? "One replay sent to selected target" : "Replay rejected or disconnected");
   activeStage = ActiveStage::Complete;
 }
@@ -990,43 +1022,31 @@ void drawHeader(const char* title) {
 }
 
 void drawSuite() {
-  drawHeader("BLE Assessment Suite");
-  if (suiteBlocked) {
-    tft.setTextColor(UI_AMBER, TFT_BLACK);
-    tft.drawString("BLE HID peer is connected.", 10, 72);
-    tft.drawString("Disconnect it before assessment", 10, 90);
-    tft.drawString("to protect shared BLE state.", 10, 108);
-    return;
+  UnifiedMenu::Item items[SUITE_ITEM_COUNT];
+  char targetLabel[42];
+  std::snprintf(targetLabel, sizeof(targetLabel), "Select target: %.23s",
+                targetSelected ? devices[selectedDevice].name : "none");
+  items[0] = {targetLabel, nullptr, !suiteBlocked};
+  for (size_t i = 0; i < TOOL_COUNT; ++i) {
+    items[i + 1] = {TOOL_NAMES[i], nullptr, !suiteBlocked && targetSelected};
   }
-  tft.setTextColor(UI_GUNMETAL, TFT_BLACK);
-  tft.setCursor(5, 30);
-  tft.printf("Target: %s", targetSelected ? devices[selectedDevice].name : "tap to scan/select");
-  const size_t start = toolPage * TOOLS_PER_PAGE;
-  const size_t end = std::min(TOOL_COUNT, start + TOOLS_PER_PAGE);
-  for (size_t i = start; i < end; ++i) {
-    const int y = 58 + static_cast<int>(i - start) * 30;
-    tft.setTextColor(i == selectedTool ? UI_AMBER : UI_CYAN, TFT_BLACK);
-    tft.setCursor(10, y); tft.printf("%u. %s", static_cast<unsigned>(i + 1), TOOL_NAMES[i]);
-  }
-  tft.setTextColor(UI_GUNMETAL, TFT_BLACK);
-  tft.setCursor(5, 278); tft.printf("Page %u/%u  tap bottom to page",
-      static_cast<unsigned>(toolPage + 1), static_cast<unsigned>((TOOL_COUNT + TOOLS_PER_PAGE - 1) / TOOLS_PER_PAGE));
-  tft.setCursor(5, 298); tft.print(AUTHORIZATION_REQUIRED);
+  toolPage = MenuNavigation::clampPage(toolPage, SUITE_ITEM_COUNT);
+  UnifiedMenu::drawMenu("BLE Assessment", items, SUITE_ITEM_COUNT, toolPage, true,
+                        targetSelected ? selectedTool + 1 : 0);
 }
 
 void drawDevices() {
-  drawHeader("Select BLE Target");
-  const size_t start = devicePage * 10;
-  const size_t end = std::min(deviceCount, start + 10);
-  for (size_t i = start; i < end; ++i) {
-    const int y = 34 + static_cast<int>(i - start) * 24;
-    const bool selected = targetSelected && i == selectedDevice;
-    tft.setTextColor(selected ? UI_AMBER : UI_CYAN, TFT_BLACK);
-    tft.setCursor(5, y); tft.printf("%c %-16.16s %d", selected ? '>' : ' ', devices[i].name, devices[i].rssi);
+  UnifiedMenu::Item items[MAX_DEVICES + 1];
+  char labels[MAX_DEVICES][32];
+  items[0] = {"Refresh BLE scan", nullptr, true};
+  for (size_t i = 0; i < deviceCount; ++i) {
+    std::snprintf(labels[i], sizeof(labels[i]), "%.20s  %d dBm", devices[i].name, devices[i].rssi);
+    items[i + 1] = {labels[i], nullptr, true};
   }
-  tft.setTextColor(UI_GUNMETAL, TFT_BLACK);
-  tft.setCursor(5, 282); tft.printf("Retained %u/%u; bottom=rescan/page",
-      static_cast<unsigned>(deviceCount), static_cast<unsigned>(MAX_DEVICES));
+  const size_t itemCount = deviceCount + 1;
+  devicePage = MenuNavigation::clampPage(devicePage, itemCount);
+  UnifiedMenu::drawMenu("Select BLE Target", items, itemCount, devicePage, true,
+                        targetSelected ? selectedDevice + 1 : SIZE_MAX);
 }
 
 void drawActivePrompt(const char* action) {
@@ -1135,9 +1155,23 @@ void drawTool() {
       break;
     default: break;
   }
-  tft.setTextColor(UI_AMBER, TFT_BLACK);
-  tft.setCursor(5, 286); tft.print("ACTION");
-  tft.setCursor(160, 286); tft.print("RESCAN/RUN");
+  if (activeStage == ActiveStage::Running) {
+    tft.fillRect(0, 270, 240, 50, TFT_RED);
+    tft.setTextColor(TFT_WHITE, TFT_RED);
+    tft.setTextFont(2);
+    const char* stopLabel = "EMERGENCY STOP";
+    tft.setCursor((240 - tft.textWidth(stopLabel)) / 2, 287);
+    tft.print(stopLabel);
+  } else {
+    tft.fillRect(0, 270, 240, 50, TFT_BLACK);
+    tft.drawRect(0, 270, 120, 50, UI_AMBER);
+    tft.drawRect(120, 270, 120, 50, UI_CYAN);
+    tft.setTextFont(2);
+    tft.setTextColor(UI_AMBER, TFT_BLACK);
+    tft.setCursor(32, 287); tft.print("ACTION");
+    tft.setTextColor(UI_CYAN, TFT_BLACK);
+    tft.setCursor(145, 287); tft.print("RESCAN/RUN");
+  }
 }
 
 void enterTool(size_t index) {
@@ -1217,48 +1251,66 @@ void handleActiveAction() {
   }
 }
 
-void handleTap(int x, int y) {
-  if (y <= 25 && x >= 165) {
+void handleMenuEvent(const MenuNavigation::MenuEvent& event) {
+  using MenuNavigation::MenuAction;
+  if (event.action == MenuAction::None) return;
+  if (event.action == MenuAction::Back) {
     if (view == View::Suite) feature_exit_requested = true;
     else {
-      disconnectClient();
       view = View::Suite;
       drawSuite();
     }
     return;
   }
-  if (suiteBlocked) return;
-  if (view == View::Suite) {
-    if (y >= 25 && y < 53) {
-      view = View::Devices;
-      drawDevices();
-      return;
-    }
-    if (y >= 52 && y < 270) {
-      const size_t index = toolPage * TOOLS_PER_PAGE + static_cast<size_t>((y - 52) / 30);
-      if (index < TOOL_COUNT) enterTool(index);
-      return;
-    }
-    if (y >= 270) {
-      toolPage = (toolPage + 1) % ((TOOL_COUNT + TOOLS_PER_PAGE - 1) / TOOLS_PER_PAGE);
+  if (event.action == MenuAction::PreviousPage || event.action == MenuAction::NextPage) {
+    if (view == View::Suite) {
+      toolPage = event.index;
       drawSuite();
+    } else {
+      devicePage = event.index;
+      drawDevices();
     }
     return;
   }
-  if (view == View::Devices) {
-    if (y >= 28 && y < 270) {
-      const size_t index = devicePage * 10 + static_cast<size_t>((y - 28) / 24);
-      if (index < deviceCount) {
-        selectedDevice = index;
-        targetSelected = true;
-        view = View::Suite;
-        drawSuite();
-      }
-    } else if (y >= 270) {
-      if (deviceCount > 10 && devicePage == 0) devicePage = 1;
-      else { devicePage = 0; scanInventory(); }
+  if (event.action != MenuAction::Item || suiteBlocked) return;
+  if (view == View::Suite) {
+    if (event.index == 0) {
+      devicePage = 0;
+      view = View::Devices;
       drawDevices();
+    } else {
+      enterTool(event.index - 1);
     }
+    return;
+  }
+  if (event.index == 0) {
+    devicePage = 0;
+    scanInventory();
+    drawDevices();
+    return;
+  }
+  const size_t index = event.index - 1;
+  if (index < deviceCount) {
+    selectedDevice = index;
+    targetSelected = true;
+    toolPage = 0;
+    view = View::Suite;
+    drawSuite();
+  }
+}
+
+void handleTap(int x, int y) {
+  if (y <= 25 && x >= 165) {
+    disconnectClient();
+    view = View::Suite;
+    drawSuite();
+    return;
+  }
+  if (suiteBlocked) return;
+
+  if (y >= 270 && activeStage == ActiveStage::Running) {
+    emergencyStop();
+    drawTool();
     return;
   }
 
@@ -1291,6 +1343,8 @@ void setup() {
   targetSelected = false;
   view = View::Suite;
   touchWasDown = false;
+  menuTouchTracker.cancel();
+  lastMenuTouchEvent = {};
   callbacksEnabled = false;
   suiteBlocked = BleHidInject::isConnected();
   if (suiteBlocked) {
@@ -1306,6 +1360,7 @@ void setup() {
 }
 
 void loop() {
+  if (view == View::Suite || view == View::Devices) updateStatusBar();
   if (view == View::Pairing) {
     const ActiveStage beforeStage = activeStage;
     processPairingTest();
@@ -1345,6 +1400,27 @@ void loop() {
   }
 
   const bool down = ts.touched();
+  if (view == View::Suite || view == View::Devices) {
+    if (down) {
+      TS_Point p = ts.getPoint();
+      const int x = ::map(p.x, TS_MINX, TS_MAXX, 0, 239);
+      const int y = ::map(p.y, TS_MAXY, TS_MINY, 0, 319);
+      const size_t itemCount = view == View::Suite ? SUITE_ITEM_COUNT : deviceCount + 1;
+      const size_t page = view == View::Suite ? toolPage : devicePage;
+      lastMenuTouchEvent = MenuNavigation::hitTestMenu(x, y, itemCount, page);
+      if (!touchWasDown) menuTouchTracker.press(lastMenuTouchEvent);
+      else menuTouchTracker.update(lastMenuTouchEvent);
+      touchWasDown = true;
+    } else if (touchWasDown) {
+      touchWasDown = false;
+      handleMenuEvent(menuTouchTracker.release(lastMenuTouchEvent));
+      lastMenuTouchEvent = {};
+    }
+    delay(1);
+    return;
+  }
+
+  menuTouchTracker.cancel();
   if (down && !touchWasDown) {
     TS_Point p = ts.getPoint();
     const int x = ::map(p.x, TS_MINX, TS_MAXX, 0, 239);

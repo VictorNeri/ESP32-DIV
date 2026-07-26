@@ -390,6 +390,7 @@ void showConnectivityPopup() {
           tft.fillRect(boxX, boxY, boxW, boxH, TFT_BLACK);
         }
         delay(150);
+        while (ts.touched()) delay(10);
         return;
       }
     }
